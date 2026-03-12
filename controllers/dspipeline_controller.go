@@ -690,51 +690,12 @@ func (r *DSPAReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&dspav1.DataSciencePipelinesApplication{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Secret{}).
-		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
 		Owns(&routev1.Route{}).
-		// Watch for global ca bundle, if one is added to this namespace
-		// we need to reconcile on all the dspa's in this namespace
-		// so they may mount this cert in the appropriate containers
-		WatchesRawSource(source.Kind(mgr.GetCache(), &corev1.ConfigMap{}),
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
-				cm := o.(*corev1.ConfigMap)
-				thisNamespace := cm.Namespace
-				log := r.Log.WithValues("namespace", thisNamespace)
-
-				if cm.Name != "odh-trusted-ca-bundle" {
-					return nil
-				}
-
-				var dspaList dspav1.DataSciencePipelinesApplicationList
-				if err := r.List(ctx, &dspaList, client.InNamespace(thisNamespace)); err != nil {
-					log.Error(err, "unable to list DSPA's when attempting to handle Global CA Bundle event.")
-					return nil
-				}
-
-				var reconcileRequests []reconcile.Request
-				for _, dspa := range dspaList.Items {
-					// Only update supported DSP versions
-					if util.DSPAWithSupportedDSPVersion(&dspa) {
-						namespacedName := types.NamespacedName{
-							Name:      dspa.Name,
-							Namespace: thisNamespace,
-						}
-						reconcileRequests = append(reconcileRequests, reconcile.Request{NamespacedName: namespacedName})
-					}
-				}
-
-				if len(reconcileRequests) > 0 {
-					log.V(1).Info(fmt.Sprintf("Reconcile event triggered by change in event on Global CA Bundle: %s", cm.Name))
-				}
-
-				return reconcileRequests
-			}),
-		).
 		WatchesRawSource(source.Kind(mgr.GetCache(), &corev1.Pod{}),
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
 				pod := o.(*corev1.Pod)
