@@ -21,6 +21,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,7 +29,11 @@ import (
 	"github.com/opendatahub-io/data-science-pipelines-operator/controllers/config"
 	"github.com/spf13/viper"
 
+	"context"
+
 	"github.com/fsnotify/fsnotify"
+	chaossdk "github.com/opendatahub-io/operator-chaos/pkg/sdk"
+
 	dspav1 "github.com/opendatahub-io/data-science-pipelines-operator/api/v1"
 	"github.com/opendatahub-io/data-science-pipelines-operator/controllers"
 	buildv1 "github.com/openshift/api/build/v1"
@@ -210,7 +215,16 @@ func main() {
 	dspSelector := labels.NewSelector().Add(*dspLabelReq)
 	dspFilter := cache.ByObject{Label: dspSelector}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restCfg := ctrl.GetConfigOrDie()
+
+	var chaosTransport *chaossdk.ChaosTransport
+	if os.Getenv("CHAOS_SDK_ENABLED") == "true" {
+		setupLog.Info("Chaos SDK enabled: wrapping HTTP transport (controlled via chaos-config ConfigMap)")
+		chaosTransport = chaossdk.NewChaosTransport(chaossdk.NewFaultConfig(nil))
+		restCfg.WrapTransport = chaosTransport.WrapTransport
+	}
+
+	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
 			BindAddress: metricsAddr,
@@ -270,6 +284,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	if chaosTransport != nil {
+		go watchChaosConfig(mgr, chaosTransport, dspoNamespace)
+	}
+
 	webhookAnnotations := map[string]string{}
 	var allowedRegistries []string
 
@@ -320,4 +338,69 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func watchChaosConfig(mgr ctrl.Manager, ct *chaossdk.ChaosTransport, namespace string) {
+	l := ctrl.Log.WithName("chaos-config-watcher")
+	l.Info("Starting chaos config watcher")
+
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		cm := &corev1.ConfigMap{}
+		key := client.ObjectKey{Name: "chaos-config", Namespace: namespace}
+
+		if err := mgr.GetAPIReader().Get(context.Background(), key, cm); err != nil {
+			ct.UpdateFaultConfig(chaossdk.NewFaultConfig(nil))
+			continue
+		}
+
+		fc := parseChaosConfigMap(cm.Data)
+		ct.UpdateFaultConfig(fc)
+	}
+}
+
+func parseChaosConfigMap(data map[string]string) *chaossdk.FaultConfig {
+	if len(data) == 0 {
+		return chaossdk.NewFaultConfig(nil)
+	}
+
+	ops := map[string]chaossdk.Operation{
+		"get":    chaossdk.OpGet,
+		"list":   chaossdk.OpList,
+		"create": chaossdk.OpCreate,
+		"update": chaossdk.OpUpdate,
+		"delete": chaossdk.OpDelete,
+		"patch":  chaossdk.OpPatch,
+	}
+
+	faults := make(map[chaossdk.Operation]chaossdk.FaultSpec)
+
+	for key, op := range ops {
+		rateStr, hasRate := data[key+".errorRate"]
+		errMsg, hasErr := data[key+".error"]
+
+		if !hasRate && !hasErr {
+			continue
+		}
+
+		spec := chaossdk.FaultSpec{
+			ErrorRate: 1.0,
+			Error:     "chaos-injected failure",
+		}
+
+		if hasRate {
+			if r, parseErr := strconv.ParseFloat(rateStr, 64); parseErr == nil {
+				spec.ErrorRate = r
+			}
+		}
+		if hasErr {
+			spec.Error = errMsg
+		}
+
+		faults[op] = spec
+	}
+
+	return chaossdk.NewFaultConfig(faults)
 }
