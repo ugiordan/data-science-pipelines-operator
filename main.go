@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -220,19 +221,28 @@ func main() {
 	restCfg := ctrl.GetConfigOrDie()
 
 	// Fetch the cluster TLS security profile for webhook and metrics servers (OpenShift only)
+	var tlsOpts []func(*tls.Config)
+	var profile configv1.TLSProfileSpec
+	var hasOpenShiftConfigAPI bool
 	bootstrapClient, err := client.New(restCfg, client.Options{Scheme: scheme})
 	if err != nil {
-		setupLog.Error(err, "unable to create bootstrap client for TLS profile")
-		os.Exit(1)
+		setupLog.Error(err, "unable to create bootstrap client for TLS profile, using hardened defaults")
+		tlsOpts = append(tlsOpts, func(c *tls.Config) {
+			c.MinVersion = tls.VersionTLS12
+			c.NextProtos = []string{"h2", "http/1.1"}
+		})
+	} else {
+		bootstrapCtx, bootstrapCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer bootstrapCancel()
+		tlsResult, err := fetchTLSProfile(bootstrapCtx, bootstrapClient)
+		if err != nil {
+			setupLog.Error(err, "unable to resolve TLS profile, failing startup")
+			os.Exit(1)
+		}
+		tlsOpts = tlsResult.TLSOpts
+		profile = tlsResult.ProfileSpec
+		hasOpenShiftConfigAPI = tlsResult.HasOpenShiftConfig
 	}
-	tlsResult, err := fetchTLSProfile(context.Background(), bootstrapClient)
-	if err != nil {
-		setupLog.Error(err, "unable to resolve TLS profile, failing startup")
-		os.Exit(1)
-	}
-	tlsOpts := tlsResult.TLSOpts
-	profile := tlsResult.ProfileSpec
-	hasOpenShiftConfigAPI := tlsResult.HasOpenShiftConfig
 
 	mgrOpts := ctrl.Options{
 		Scheme: scheme,
