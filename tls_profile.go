@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 
 	configv1 "github.com/openshift/api/config/v1"
@@ -32,7 +33,8 @@ func fetchTLSProfile(ctx context.Context, cli client.Client) (*tlsResult, error)
 			l.Info("APIServer resource not found, using Intermediate TLS profile as fallback")
 		case apierrors.IsServiceUnavailable(err),
 			apierrors.IsTimeout(err),
-			apierrors.IsTooManyRequests(err):
+			apierrors.IsTooManyRequests(err),
+			errors.Is(err, context.DeadlineExceeded):
 			l.Info("Transient API error reading TLS profile, using Intermediate TLS profile as fallback", "error", err)
 		default:
 			return nil, fmt.Errorf("failed to fetch TLS profile: %w", err)
